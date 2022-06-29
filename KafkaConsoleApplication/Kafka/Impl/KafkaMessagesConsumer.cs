@@ -1,5 +1,7 @@
 ﻿using System.Collections.Concurrent;
 using Confluent.Kafka;
+using KafkaConsoleApplication.Kafka.Models;
+using Polly;
 
 namespace KafkaConsoleApplication.Kafka.Impl;
 
@@ -74,11 +76,12 @@ public class KafkaMessagesConsumer : IKafkaMessagesConsumer
             var batchStartTime = DateTime.UtcNow;
             var index = 0;
 
-            // consume batch messages
+            // consume batch messages based on count and timespan
             while (index++ < batchCount && DateTime.UtcNow - batchStartTime <= batchPeriod)
             {
                 try
                 {
+                    // todo redis
                     var message = consumer.Consume(batchPeriod.Value);
                     if (message is { Message: { } })
                     {
@@ -108,8 +111,10 @@ public class KafkaMessagesConsumer : IKafkaMessagesConsumer
                         .OrderBy(consumeResult => consumeResult.Offset.Value)
                         .ToArray());
 
-            var offsetsToCommitBag = new ConcurrentBag<TopicPartitionOffset>();
+            // concurrent bag for storing commitModel
+            var partitionOffsetCommitModels = new ConcurrentBag<TopicPartitionOffsetCommitModel>();
 
+            // local function adds commitModel to the bag if the processing (action from argument) was finished without any exceptions
             void ProcessMessagesByPartitionId(int partitionId)
             {
                 try
@@ -120,9 +125,13 @@ public class KafkaMessagesConsumer : IKafkaMessagesConsumer
 
                     processMessages(messagesToProcess);
 
-                    offsetsToCommitBag.Add(new TopicPartitionOffset(
-                        messagesByPartition[partitionId].Last().TopicPartition,
-                        messagesByPartition[partitionId].Last().Offset + 1));
+                    partitionOffsetCommitModels.Add(new TopicPartitionOffsetCommitModel
+                    {
+                        PartitionOffset = new TopicPartitionOffset(
+                            messagesByPartition[partitionId].Last().TopicPartition,
+                            messagesByPartition[partitionId].Last().Offset + 1),
+                        StartOffset = messagesByPartition[partitionId].First().Offset.Value
+                    });
                 }
                 catch (Exception exception)
                 {
@@ -130,10 +139,52 @@ public class KafkaMessagesConsumer : IKafkaMessagesConsumer
                 }
             }
 
+            // process messages in parallel for each partition and fill out concurrent bag
             Parallel.ForEach(messagesByPartition.Keys, ProcessMessagesByPartitionId);
 
-            // commit only offsets, which batches were processed correctly
-            consumer.Commit(offsetsToCommitBag.ToArray());
+            // commit offsets, where batches were processed correctly without any exceptions
+            await CommitOffsetsAsync(consumer, partitionOffsetCommitModels.ToArray(), cancellationToken);
         }
+    }
+
+    /// <summary>
+    /// Commit offsets
+    /// </summary>
+    private async Task CommitOffsetsAsync<TKey, TValue>(IConsumer<TKey, TValue> consumer,
+        TopicPartitionOffsetCommitModel[] offsetCommitModels, CancellationToken cancellationToken)
+    {
+        const int maxRetries = 3;
+        const int retryPeriodSeconds = 2;
+
+        // do commiting in parallel for each partition
+        await Parallel.ForEachAsync(offsetCommitModels, cancellationToken, async (offsetCommitModel, token) =>
+        {
+            try
+            {
+                var retryPolicy = Policy.Handle<Exception>()
+                    .WaitAndRetryAsync(retryCount: maxRetries,
+                        sleepDurationProvider: _ => TimeSpan.FromSeconds(retryPeriodSeconds),
+                        onRetry: (exception, sleepDuration, attemptNumber, context) =>
+                        {
+                            Console.WriteLine(
+                                $"Retrying consumer committing in {sleepDuration}. {attemptNumber} / {maxRetries}");
+                        });
+
+                await retryPolicy.ExecuteAsync(() =>
+                {
+                    consumer.Commit(new[] { offsetCommitModel.PartitionOffset });
+                    return Task.CompletedTask;
+                });
+            }
+            // got something wrong during commiting offset
+            // therefore we need to do "seek" to move to the old offset for our local consumer for the partition
+            catch (Exception exception)
+            {
+                Console.WriteLine($"Fail after consumer commit retrying. Exception message {exception.Message} ");
+
+                consumer.Seek(new TopicPartitionOffset(offsetCommitModel.PartitionOffset.TopicPartition,
+                    offsetCommitModel.StartOffset));
+            }
+        });
     }
 }
