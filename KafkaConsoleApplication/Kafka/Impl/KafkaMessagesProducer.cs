@@ -1,4 +1,6 @@
 ﻿using Confluent.Kafka;
+using KafkaConsoleApplication.Kafka.Models;
+using KafkaConsoleApplication.Kafka.Serializers;
 
 namespace KafkaConsoleApplication.Kafka.Impl;
 
@@ -14,16 +16,20 @@ public class KafkaMessagesProducer : IKafkaMessagesProducer
             BootstrapServers = host
         };
 
-        using var producer = new ProducerBuilder<string, string>(producerConfig)
+        using var producer = new ProducerBuilder<string, TestMessageValue>(producerConfig)
+            .SetValueSerializer(new CustomKafkaSerializer<TestMessageValue>())
             .Build();
 
-        var rand = new Random();
         for (var i = 0; i < messagesCount; i++)
         {
-            var msg = new Message<string, string>
+            var msg = new Message<string, TestMessageValue>
             {
                 Key = cityName,
-                Value = i.ToString()
+                Value = new TestMessageValue
+                {
+                    Id = Guid.NewGuid(),
+                    SomeValue = i
+                }
             };
 
             producer.Produce(topic, msg);

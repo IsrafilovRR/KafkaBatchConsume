@@ -1,5 +1,6 @@
 ﻿using KafkaConsoleApplication.Kafka;
 using KafkaConsoleApplication.Kafka.Impl;
+using KafkaConsoleApplication.Redis;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace KafkaConsoleApplication;
@@ -21,6 +22,7 @@ public static class Program
     {
         services
             .AddSingleton<IKafkaMessagesConsumer, KafkaMessagesConsumer>()
-            .AddSingleton<IKafkaMessagesProducer, KafkaMessagesProducer>();
+            .AddSingleton<IKafkaMessagesProducer, KafkaMessagesProducer>()
+            .AddSingleton<IRedisRepository, RedisRepository>();
     }
 }

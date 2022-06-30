@@ -1,6 +1,8 @@
 ﻿using System.Collections.Concurrent;
 using Confluent.Kafka;
 using KafkaConsoleApplication.Kafka.Models;
+using KafkaConsoleApplication.Kafka.Serializers;
+using KafkaConsoleApplication.Redis;
 using Polly;
 
 namespace KafkaConsoleApplication.Kafka.Impl;
@@ -8,7 +10,15 @@ namespace KafkaConsoleApplication.Kafka.Impl;
 /// <inheritdoc />
 public class KafkaMessagesConsumer : IKafkaMessagesConsumer
 {
+    private readonly IRedisRepository _redisRepository;
+
+    public KafkaMessagesConsumer(IRedisRepository redisRepository)
+    {
+        _redisRepository = redisRepository;
+    }
+
     /// <inheritdoc />
+    /// code from workshop
     public async Task ConsumeMessagesAsync<TKey, TValue>(string host, string topic, string groupId,
         Action<Message<TKey, TValue>> processMessage,
         CancellationToken cancellationToken)
@@ -52,7 +62,7 @@ public class KafkaMessagesConsumer : IKafkaMessagesConsumer
     public async Task BatchConsumeMessagesAsync<TKey, TValue>(string host, string topic, string groupId,
         Action<IReadOnlyCollection<Message<TKey, TValue>>> processMessages,
         CancellationToken cancellationToken,
-        TimeSpan? batchPeriod, int batchCount)
+        TimeSpan? batchPeriod, int batchCount) where TValue : MessageValueWithIdentifier
     {
         batchPeriod ??= TimeSpan.FromMinutes(1);
 
@@ -66,6 +76,7 @@ public class KafkaMessagesConsumer : IKafkaMessagesConsumer
         };
 
         var consumer = new ConsumerBuilder<TKey, TValue>(consumerConfig)
+            .SetValueDeserializer(new CustomKafkaSerializer<TValue>())
             .Build();
 
         consumer.Subscribe(new[] { topic });
@@ -77,16 +88,16 @@ public class KafkaMessagesConsumer : IKafkaMessagesConsumer
             var index = 0;
 
             // consume batch messages based on count and timespan
-            while (index++ < batchCount && DateTime.UtcNow - batchStartTime <= batchPeriod)
+            while (index < batchCount && DateTime.UtcNow - batchStartTime <= batchPeriod)
             {
                 try
                 {
-                    // todo redis
                     var message = consumer.Consume(batchPeriod.Value);
-                    if (message is { Message: { } })
-                    {
-                        consumedMessages.Add(message);
-                    }
+                    if (message?.Message?.Value == null ||
+                        await _redisRepository.KeyExistsAsync(message.Message.Value.Id.ToString())) continue;
+
+                    consumedMessages.Add(message);
+                    index++;
                 }
                 catch (ConsumeException exception)
                 {
@@ -115,7 +126,7 @@ public class KafkaMessagesConsumer : IKafkaMessagesConsumer
             var partitionOffsetCommitModels = new ConcurrentBag<TopicPartitionOffsetCommitModel>();
 
             // local function adds commitModel to the bag if the processing (action from argument) was finished without any exceptions
-            void ProcessMessagesByPartitionId(int partitionId)
+            async Task ProcessMessagesByPartitionIdAsync(int partitionId, CancellationToken token)
             {
                 try
                 {
@@ -124,6 +135,10 @@ public class KafkaMessagesConsumer : IKafkaMessagesConsumer
                         .ToArray();
 
                     processMessages(messagesToProcess);
+
+                    // after successfully processing of the messages we have to store the keys in redis
+                    await _redisRepository.AddKeysAsync(messagesToProcess.Select(message => message.Value.Id.ToString())
+                        .ToArray());
 
                     partitionOffsetCommitModels.Add(new TopicPartitionOffsetCommitModel
                     {
@@ -140,7 +155,8 @@ public class KafkaMessagesConsumer : IKafkaMessagesConsumer
             }
 
             // process messages in parallel for each partition and fill out concurrent bag
-            Parallel.ForEach(messagesByPartition.Keys, ProcessMessagesByPartitionId);
+            await Parallel.ForEachAsync(messagesByPartition.Keys, cancellationToken,
+                async (key, token) => { await ProcessMessagesByPartitionIdAsync(key, token); });
 
             // commit offsets, where batches were processed correctly without any exceptions
             await CommitOffsetsAsync(consumer, partitionOffsetCommitModels.ToArray(), cancellationToken);

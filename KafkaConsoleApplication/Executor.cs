@@ -1,4 +1,5 @@
 ﻿using KafkaConsoleApplication.Kafka;
+using KafkaConsoleApplication.Kafka.Models;
 
 namespace KafkaConsoleApplication;
 
@@ -22,8 +23,8 @@ public class Executor
         try
         {
             // await InitKafkaMessagesAsync();
-
-            await _messagesConsumer.BatchConsumeMessagesAsync<string, string>(KafkaHost,
+                 
+            await _messagesConsumer.BatchConsumeMessagesAsync<string, TestMessageValue>(KafkaHost,
                 TemperatureSensorMessagesTopic, GroupId,
                 (messages) =>
                 {
@@ -31,7 +32,7 @@ public class Executor
             
                     foreach (var message in messages)
                     {
-                        Console.WriteLine($"Key - {message.Key}, value - {message.Value} ");
+                        Console.WriteLine($"Key - {message.Key}, value - {message.Value.SomeValue} ");
                     }
             
                     Console.WriteLine($"Thread id: {Thread.CurrentThread.ManagedThreadId}");
