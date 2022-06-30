@@ -1,4 +1,14 @@
-# Homework 5. Kafka batch consume with exactly once processing
+# Kafka batch consume with exactly once processing
+
+# Requirements
+Реализовать батчевый kafka-консьюмер, который считывает N сообщений из топика и отдаёт их на обработку делегату обработчику void ProcessMessage<TKey, TValue>(IReadOnlyCollection<Message<TKey, TValue>> message) , который принимает на вход массив сообщений из топика.
+
+важно предусмотреть:
+- корректную обработку ошибок
+- правильное сохранение оффсета в рамках партиции
+
+задание со звёздочкой:
+- реализовать exactly-once / идемпотентную обработку сообщений из топика с помощью редиса в качестве хранилища (отредактировано) 
 
 ## Init
 
